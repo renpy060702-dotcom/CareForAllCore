@@ -1,0 +1,132 @@
+import sqlite3
+import urllib.request
+import csv
+import io
+import time
+
+CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQTrsSdJ1LMrRPSJ4MSECO7AN3HJVryQUk-HaYnAXFfoBsxUaaz6us3AXSfJ5Jd05STsJDw5Dp9RJcp/pub?output=csv"
+DB_NAME = "vaccine_system.db"
+CHECK_INTERVAL = 30  # seconds
+
+
+def fetch_csv(url):
+    with urllib.request.urlopen(url) as response:
+        data = response.read()
+
+    text = data.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    return list(reader)
+
+
+def create_table(cursor):
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS patients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT UNIQUE,
+        name TEXT,
+        age INTEGER,
+        guardian_name TEXT,
+        contact_number TEXT,
+        vaccine_type TEXT,
+        vaccine_schedule TEXT,
+        date_of_visit TEXT,
+        email TEXT
+    )
+    """)
+
+
+def patient_exists(cursor, timestamp):
+    cursor.execute("SELECT 1 FROM patients WHERE timestamp = ?", (timestamp,))
+    return cursor.fetchone() is not None
+
+
+def insert_new_data(cursor, rows):
+    sql = """
+    INSERT INTO patients (
+        timestamp,
+        name,
+        age,
+        guardian_name,
+        contact_number,
+        vaccine_type,
+        vaccine_schedule,
+        date_of_visit,
+        email
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    inserted_count = 0
+
+    for row in rows:
+        timestamp = row.get("Timestamp")
+        name = row.get("Pangalan (Apelyido, Pangalan, M.I.)")
+        age = row.get("Edad")
+        guardian = row.get("Pangalan ng Magulang o Tagapangalaga")
+        contact = row.get("Contact Number (ex. 9649127322)")
+        vaccine = row.get("Klase ng Bakuna")
+        schedule = row.get("Iskedyul ng mga Bakuna")
+        visit = row.get("Petsa ng Pagbisita")
+        email = row.get("Email address")
+
+        if not timestamp:
+            continue
+
+        if patient_exists(cursor, timestamp):
+            continue
+
+        try:
+            age = int(age)
+        except (TypeError, ValueError):
+            age = None
+
+        cursor.execute(sql, (
+            timestamp,
+            name,
+            age,
+            guardian,
+            contact,
+            vaccine,
+            schedule,
+            visit,
+            email
+        ))
+
+        inserted_count += 1
+
+    return inserted_count
+
+
+def check_for_new_patients():
+    try:
+        rows = fetch_csv(CSV_URL)
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        create_table(cursor)
+
+        inserted = insert_new_data(cursor, rows)
+
+        conn.commit()
+        conn.close()
+
+        if inserted > 0:
+            print(f"New patient(s) added: {inserted}")
+        else:
+            print("No new patients found.")
+
+    except Exception as e:
+        print("Error while checking Google Sheet:", e)
+
+
+def main():
+    print("Monitoring Google Sheet for new patients every 30 seconds...")
+    print("-" * 60)
+
+    while True:
+        check_for_new_patients()
+        time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
