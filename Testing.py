@@ -4,6 +4,7 @@ import csv
 import io
 import time
 import smtplib
+import requests
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
@@ -17,7 +18,10 @@ CHECK_INTERVAL = 5  # seconds
 SENDER_EMAIL = "rentestpy@gmail.com"
 SENDER_PASSWORD = "wifk rurp qlix itzd"
 
-# Set to True for quick testing, False for real-date based reminders
+BOT_TOKEN = "8544421333:AAHFb3y9NhdgNSDVi8-l-u9KQpIfS9Rr66M"
+
+# True = quick testing using seconds
+# False = real reminder based on actual next vaccination date
 TEST_MODE = True
 
 # =========================
@@ -33,56 +37,83 @@ TEST_DELAY_MAP = {
 }
 
 # =========================
-# VACCINE FLOW
+# VACCINATION FLOW
+# current completed stage -> next stage
 # =========================
 VACCINE_FLOW = {
     "At Birth": {
-        "next_schedule": "First Visit (1 ½ Months)",
-        "days_until_next": 45,
+        "current_vaccines": [
+            "BCG",
+            "Hepatitis B"
+        ],
+        "next_stage": "First Visit (1 ½ Months)",
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
         ],
+        "days_until_next": 45
     },
     "First Visit (1 ½ Months)": {
-        "next_schedule": "Second Visit (2 ½ Months)",
-        "days_until_next": 30,
+        "current_vaccines": [
+            "Pentavalent Vaccine (DPT-Hep B-HIB)",
+            "Oral Polio Vaccine (OPV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
+        ],
+        "next_stage": "Second Visit (2 ½ Months)",
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
         ],
+        "days_until_next": 30
     },
     "Second Visit (2 ½ Months)": {
-        "next_schedule": "Third Visit (3 ½ Months)",
-        "days_until_next": 30,
+        "current_vaccines": [
+            "Pentavalent Vaccine (DPT-Hep B-HIB)",
+            "Oral Polio Vaccine (OPV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
+        ],
+        "next_stage": "Third Visit (3 ½ Months)",
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
             "Inactivated Polio Vaccine (IPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
         ],
+        "days_until_next": 30
     },
     "Third Visit (3 ½ Months)": {
-        "next_schedule": "Fourth Visit (9 Months)",
-        "days_until_next": 165,
-        "next_vaccines": [
-            "Measles, Mumps, Rubella Vaccine (MMR)",
+        "current_vaccines": [
+            "Pentavalent Vaccine (DPT-Hep B-HIB)",
+            "Oral Polio Vaccine (OPV)",
+            "Inactivated Polio Vaccine (IPV)",
+            "Pneumococcal Conjugate Vaccine (PCV)"
         ],
+        "next_stage": "Fourth Visit (9 Months)",
+        "next_vaccines": [
+            "Measles, Mumps, Rubella Vaccine (MMR)"
+        ],
+        "days_until_next": 165
     },
     "Fourth Visit (9 Months)": {
-        "next_schedule": "Fifth Visit (1 Year)",
-        "days_until_next": 90,
-        "next_vaccines": [
-            "Measles, Mumps, Rubella Vaccine (MMR)",
+        "current_vaccines": [
+            "Measles, Mumps, Rubella Vaccine (MMR)"
         ],
+        "next_stage": "Fifth Visit (1 Year)",
+        "next_vaccines": [
+            "Measles, Mumps, Rubella Vaccine (MMR)"
+        ],
+        "days_until_next": 90
     },
     "Fifth Visit (1 Year)": {
-        "next_schedule": None,
-        "days_until_next": None,
+        "current_vaccines": [
+            "Measles, Mumps, Rubella Vaccine (MMR)"
+        ],
+        "next_stage": None,
         "next_vaccines": [],
-    },
+        "days_until_next": None
+    }
 }
 
 
@@ -109,11 +140,14 @@ def create_table():
             guardian_name TEXT,
             contact_number TEXT,
             email TEXT,
+            telegram_chat_id TEXT,
             vaccine_type TEXT,
             vaccine_schedule TEXT,
             date_of_visit TEXT,
             last_emailed_schedule TEXT,
+            last_telegram_schedule TEXT,
             initial_email_sent INTEGER DEFAULT 0,
+            initial_telegram_sent INTEGER DEFAULT 0,
             schedule_changed_at TEXT
         )
     """)
@@ -133,8 +167,11 @@ def ensure_columns_exist():
         "password": "TEXT",
         "consent": "TEXT",
         "admission_type": "TEXT",
+        "telegram_chat_id": "TEXT",
         "last_emailed_schedule": "TEXT",
+        "last_telegram_schedule": "TEXT",
         "initial_email_sent": "INTEGER DEFAULT 0",
+        "initial_telegram_sent": "INTEGER DEFAULT 0",
         "schedule_changed_at": "TEXT",
     }
 
@@ -148,7 +185,14 @@ def ensure_columns_exist():
 
 def get_patient_by_timestamp(cursor, timestamp):
     cursor.execute("""
-        SELECT id, vaccine_schedule, last_emailed_schedule, initial_email_sent, schedule_changed_at
+        SELECT
+            id,
+            vaccine_schedule,
+            last_emailed_schedule,
+            last_telegram_schedule,
+            initial_email_sent,
+            initial_telegram_sent,
+            schedule_changed_at
         FROM patients
         WHERE timestamp = ?
     """, (timestamp,))
@@ -167,13 +211,16 @@ def insert_patient(cursor, data):
             guardian_name,
             contact_number,
             email,
+            telegram_chat_id,
             vaccine_type,
             vaccine_schedule,
             date_of_visit,
             last_emailed_schedule,
+            last_telegram_schedule,
             initial_email_sent,
+            initial_telegram_sent,
             schedule_changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, data)
 
 
@@ -188,6 +235,7 @@ def update_patient_info(
     guardian_name,
     contact_number,
     email,
+    telegram_chat_id,
     vaccine_type,
     vaccine_schedule,
     date_of_visit
@@ -202,6 +250,7 @@ def update_patient_info(
             guardian_name = ?,
             contact_number = ?,
             email = ?,
+            telegram_chat_id = ?,
             vaccine_type = ?,
             vaccine_schedule = ?,
             date_of_visit = ?
@@ -215,6 +264,7 @@ def update_patient_info(
         guardian_name,
         contact_number,
         email,
+        telegram_chat_id,
         vaccine_type,
         vaccine_schedule,
         date_of_visit,
@@ -238,6 +288,14 @@ def update_last_emailed_schedule(cursor, timestamp, schedule):
     """, (schedule, timestamp))
 
 
+def update_last_telegram_schedule(cursor, timestamp, schedule):
+    cursor.execute("""
+        UPDATE patients
+        SET last_telegram_schedule = ?
+        WHERE timestamp = ?
+    """, (schedule, timestamp))
+
+
 def mark_initial_email_sent(cursor, timestamp):
     cursor.execute("""
         UPDATE patients
@@ -246,8 +304,16 @@ def mark_initial_email_sent(cursor, timestamp):
     """, (timestamp,))
 
 
+def mark_initial_telegram_sent(cursor, timestamp):
+    cursor.execute("""
+        UPDATE patients
+        SET initial_telegram_sent = 1
+        WHERE timestamp = ?
+    """, (timestamp,))
+
+
 # =========================
-# GOOGLE SHEETS
+# GOOGLE SHEET READER
 # =========================
 def fetch_csv(url):
     with urllib.request.urlopen(url) as response:
@@ -272,7 +338,7 @@ def get_value(row, *possible_keys):
 
 
 # =========================
-# DATE / TIME HELPERS
+# DATE/TIME HELPERS
 # =========================
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -333,25 +399,6 @@ def format_vaccination_date(dt):
     return dt.strftime("%B %d, %Y")
 
 
-def calculate_next_vaccination_date(current_schedule, visit_date):
-    if not current_schedule or not visit_date:
-        return None
-
-    visit_dt = parse_date_only(visit_date)
-    if not visit_dt:
-        return None
-
-    schedule_info = VACCINE_FLOW.get(current_schedule)
-    if not schedule_info:
-        return None
-
-    days_until_next = schedule_info.get("days_until_next")
-    if days_until_next is None:
-        return None
-
-    return visit_dt + timedelta(days=days_until_next)
-
-
 def calculate_test_due_datetime(current_schedule, schedule_changed_at):
     if not current_schedule or not schedule_changed_at:
         return None
@@ -368,7 +415,7 @@ def calculate_test_due_datetime(current_schedule, schedule_changed_at):
 
 
 # =========================
-# SCHEDULE NORMALIZATION
+# SCHEDULE / FLOW HELPERS
 # =========================
 def normalize_schedule(schedule_text):
     if not schedule_text:
@@ -392,8 +439,34 @@ def normalize_schedule(schedule_text):
     return None
 
 
+def get_next_vaccine_info(current_schedule, visit_date):
+    if not current_schedule:
+        return None
+
+    flow = VACCINE_FLOW.get(current_schedule)
+    if not flow:
+        return None
+
+    next_stage = flow.get("next_stage")
+    next_vaccines = flow.get("next_vaccines", [])
+    days_until_next = flow.get("days_until_next")
+
+    next_date = None
+    if visit_date and days_until_next is not None:
+        visit_dt = parse_date_only(visit_date)
+        if visit_dt:
+            next_date = visit_dt + timedelta(days=days_until_next)
+
+    return {
+        "current_schedule": current_schedule,
+        "next_stage": next_stage,
+        "next_vaccines": next_vaccines,
+        "next_date": next_date
+    }
+
+
 # =========================
-# EMAIL CONTENT
+# EMAIL
 # =========================
 def build_initial_email(name, guardian_name, current_schedule, visit_date):
     return f"""
@@ -463,6 +536,60 @@ def send_email(to_email, subject, body):
 
 
 # =========================
+# TELEGRAM
+# =========================
+def build_initial_telegram(name, guardian_name, current_schedule, visit_date):
+    return f"""Care4Core Registration Confirmation
+
+Hello {guardian_name if guardian_name else "Parent/Guardian"},
+
+{name} has been registered in the Care4Core Vaccination Reminder System.
+
+Current schedule:
+{current_schedule if current_schedule else "Not recognized"}
+
+Visit date:
+{visit_date if visit_date else "Not provided"}
+
+Telegram reminders are now enabled.
+"""
+
+
+def build_telegram_reminder(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date):
+    vaccines_text = "\n".join(f"- {v}" for v in next_vaccines) if next_vaccines else "No vaccine listed."
+
+    return f"""Care4Core Vaccination Reminder
+
+Hello {guardian_name if guardian_name else "Parent/Guardian"},
+
+This is a reminder for {name}'s next vaccination.
+
+Current completed schedule:
+{current_schedule}
+
+Next vaccination schedule:
+{next_schedule if next_schedule else "No next schedule available"}
+
+Next vaccination date:
+{next_vaccination_date}
+
+Recommended vaccine(s):
+{vaccines_text}
+"""
+
+
+def send_telegram_message(chat_id, message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {
+        "chat_id": str(chat_id),
+        "text": message
+    }
+    response = requests.post(url, data=data, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+# =========================
 # MAIN PROCESS
 # =========================
 def process_patients():
@@ -480,7 +607,9 @@ def process_patients():
             consent = get_value(
                 row,
                 'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin sa pamamagitn ng pag-click sa "Sang-ayon"',
-                'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin Sa pamamagitan ng pag-click sa "Sang-ayon"'
+                'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin Sa pamamagitan ng pag-click sa "Sang-ayon"',
+                'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagan Sa pamamagitan ng pag click sa "Sang-ayon"',
+                'Bilang pagsunod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin sa pamamagitan ng pag-click sa "Sang-ayon"'
             )
             admission_type = get_value(row, "Admission Type")
             name = get_value(row, "Pangalan (Apelyido, Pangalan, M.I.)")
@@ -488,6 +617,7 @@ def process_patients():
             guardian = get_value(row, "Pangalan ng Magulang o Tagapangalaga")
             contact = get_value(row, "Contact Number (ex. 9649127322)")
             email = get_value(row, "Email Address", "Email address")
+            telegram_chat_id = get_value(row, "Telegram ID", "Telegram Chat ID", "TelegramID")
             vaccine = get_value(row, "Klase ng Bakuna")
             schedule_raw = get_value(row, "Iskedyul ng mga Bakuna")
             visit = get_value(row, "Petsa ng Pagbisita")
@@ -516,23 +646,36 @@ def process_patients():
                     guardian,
                     contact,
                     email,
+                    telegram_chat_id,
                     vaccine,
                     normalized_schedule,
                     visit,
-                    None,
-                    0,
+                    None,   # last_emailed_schedule
+                    None,   # last_telegram_schedule
+                    0,      # initial_email_sent
+                    0,      # initial_telegram_sent
                     detected_time
                 ))
 
                 stored_schedule = normalized_schedule
                 last_emailed_schedule = None
+                last_telegram_schedule = None
                 initial_email_sent = 0
+                initial_telegram_sent = 0
                 schedule_changed_at = detected_time
 
                 print(f"New patient added: {name}")
 
             else:
-                _, stored_schedule, last_emailed_schedule, initial_email_sent, schedule_changed_at = patient
+                (
+                    _,
+                    stored_schedule,
+                    last_emailed_schedule,
+                    last_telegram_schedule,
+                    initial_email_sent,
+                    initial_telegram_sent,
+                    schedule_changed_at
+                ) = patient
 
                 schedule_to_store = normalized_schedule if normalized_schedule else stored_schedule
 
@@ -547,6 +690,7 @@ def process_patients():
                     guardian,
                     contact,
                     email,
+                    telegram_chat_id,
                     vaccine,
                     schedule_to_store,
                     visit
@@ -561,6 +705,9 @@ def process_patients():
 
                 normalized_schedule = schedule_to_store
 
+            # =========================
+            # INITIAL EMAIL
+            # =========================
             if email and initial_email_sent == 0:
                 try:
                     subject = f"Care4Core Registration Confirmation for {name}"
@@ -572,35 +719,49 @@ def process_patients():
                 except Exception as e:
                     print(f"Failed to send initial email to {name} ({email}): {e}")
 
-            if not email:
-                print(f"Skipped reminder for {name}: no email address.")
-                continue
+            # =========================
+            # INITIAL TELEGRAM
+            # =========================
+            if telegram_chat_id and initial_telegram_sent == 0:
+                try:
+                    tg_initial = build_initial_telegram(name, guardian, normalized_schedule, visit)
+                    send_telegram_message(telegram_chat_id, tg_initial)
+                    mark_initial_telegram_sent(cursor, timestamp)
+                    initial_telegram_sent = 1
+                    print(f"Initial Telegram message sent to {name} ({telegram_chat_id})")
+                except Exception as e:
+                    print(f"Failed to send initial Telegram message to {name} ({telegram_chat_id}): {e}")
 
+            # no recognized schedule yet
             if not normalized_schedule:
                 print(f"Skipped reminder for {name}: schedule not recognized.")
                 continue
 
-            if normalized_schedule == last_emailed_schedule:
-                print(f"No reminder for {name}: already emailed for schedule '{normalized_schedule}'.")
-                continue
-
-            next_info = VACCINE_FLOW.get(normalized_schedule)
+            next_info = get_next_vaccine_info(normalized_schedule, visit)
             if not next_info:
                 print(f"Skipped reminder for {name}: no vaccine flow found.")
                 continue
 
-            next_schedule = next_info.get("next_schedule")
-            next_vaccines = next_info.get("next_vaccines", [])
+            next_schedule = next_info["next_stage"]
+            next_vaccines = next_info["next_vaccines"]
+            next_vaccination_dt = next_info["next_date"]
 
             if not next_schedule:
-                print(f"No reminder for {name}: no next schedule available.")
-                update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
+                print(f"No reminder for {name}: vaccination flow already completed.")
+
+                if email and last_emailed_schedule != normalized_schedule:
+                    update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
+
+                if telegram_chat_id and last_telegram_schedule != normalized_schedule:
+                    update_last_telegram_schedule(cursor, timestamp, normalized_schedule)
+
                 continue
 
-            next_vaccination_dt = calculate_next_vaccination_date(normalized_schedule, visit)
             if not next_vaccination_dt:
                 print(f"Skipped reminder for {name}: could not calculate next vaccination date.")
                 continue
+
+            reminder_ready = False
 
             if TEST_MODE:
                 due_time = calculate_test_due_datetime(normalized_schedule, schedule_changed_at)
@@ -608,30 +769,63 @@ def process_patients():
                     print(f"Skipped reminder for {name}: could not calculate test due time.")
                     continue
 
-                if datetime.now() < due_time:
+                if datetime.now() >= due_time:
+                    reminder_ready = True
+                else:
                     remaining = int((due_time - datetime.now()).total_seconds())
                     print(f"Waiting for reminder of {name}: {remaining} second(s) remaining.")
                     continue
             else:
-                if datetime.now().date() < next_vaccination_dt.date():
-                    print(f"Not yet time to remind {name}. Next vaccination date is {format_vaccination_date(next_vaccination_dt)}.")
+                if datetime.now().date() >= next_vaccination_dt.date():
+                    reminder_ready = True
+                else:
+                    print(
+                        f"Not yet time to remind {name}. "
+                        f"Next vaccination date is {format_vaccination_date(next_vaccination_dt)}."
+                    )
                     continue
 
-            try:
-                subject = f"Vaccination Reminder for {name}"
-                body = build_reminder_email(
-                    name=name,
-                    guardian_name=guardian,
-                    current_schedule=normalized_schedule,
-                    next_schedule=next_schedule,
-                    next_vaccines=next_vaccines,
-                    next_vaccination_date=format_vaccination_date(next_vaccination_dt)
-                )
-                send_email(email, subject, body)
-                update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
-                print(f"Reminder email sent to {name} ({email})")
-            except Exception as e:
-                print(f"Failed to send reminder email to {name} ({email}): {e}")
+            if not reminder_ready:
+                continue
+
+            # =========================
+            # EMAIL REMINDER
+            # =========================
+            if email and last_emailed_schedule != normalized_schedule:
+                try:
+                    subject = f"Vaccination Reminder for {name}"
+                    body = build_reminder_email(
+                        name=name,
+                        guardian_name=guardian,
+                        current_schedule=normalized_schedule,
+                        next_schedule=next_schedule,
+                        next_vaccines=next_vaccines,
+                        next_vaccination_date=format_vaccination_date(next_vaccination_dt)
+                    )
+                    send_email(email, subject, body)
+                    update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
+                    print(f"Reminder email sent to {name} ({email})")
+                except Exception as e:
+                    print(f"Failed to send reminder email to {name} ({email}): {e}")
+
+            # =========================
+            # TELEGRAM REMINDER
+            # =========================
+            if telegram_chat_id and last_telegram_schedule != normalized_schedule:
+                try:
+                    telegram_body = build_telegram_reminder(
+                        name=name,
+                        guardian_name=guardian,
+                        current_schedule=normalized_schedule,
+                        next_schedule=next_schedule,
+                        next_vaccines=next_vaccines,
+                        next_vaccination_date=format_vaccination_date(next_vaccination_dt)
+                    )
+                    telegram_result = send_telegram_message(telegram_chat_id, telegram_body)
+                    update_last_telegram_schedule(cursor, timestamp, normalized_schedule)
+                    print(f"Telegram reminder sent to {name} ({telegram_chat_id}) -> {telegram_result}")
+                except Exception as e:
+                    print(f"Failed to send Telegram reminder to {name} ({telegram_chat_id}): {e}")
 
         conn.commit()
 
@@ -650,7 +844,7 @@ def main():
     create_table()
     ensure_columns_exist()
 
-    print("Monitoring Google Sheet for new patients and reminders...")
+    print("Monitoring Google Sheet for patients and reminders...")
     print(f"TEST_MODE = {TEST_MODE}")
     print("-" * 60)
 
