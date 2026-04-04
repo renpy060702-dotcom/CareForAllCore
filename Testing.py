@@ -12,21 +12,24 @@ from email.message import EmailMessage
 # =========================
 CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQTrsSdJ1LMrRPSJ4MSECO7AN3HJVryQUk-HaYnAXFfoBsxUaaz6us3AXSfJ5Jd05STsJDw5Dp9RJcp/pub?output=csv"
 DB_NAME = "vaccine_system.db"
-CHECK_INTERVAL = 5  # check every 5 seconds for faster testing
+CHECK_INTERVAL = 5  # seconds
 
 SENDER_EMAIL = "rentestpy@gmail.com"
 SENDER_PASSWORD = "wifk rurp qlix itzd"
 
+# Set to True for quick testing, False for real-date based reminders
+TEST_MODE = True
 
 # =========================
-# TEST REMINDER DELAYS
+# TEST DELAYS
 # =========================
 TEST_DELAY_MAP = {
-    "At Birth": 30,                    # 30 seconds
-    "First Visit (1 ½ Months)": 60,    # 1 minute
-    "Second Visit (2 ½ Months)": 90,   # 1 minute 30 seconds
-    "Third Visit (3 ½ Months)": 120,   # 2 minutes
-    "Fourth Visit (9 Months)": 150     # 2 minutes 30 seconds
+    "At Birth": 30,
+    "First Visit (1 ½ Months)": 60,
+    "Second Visit (2 ½ Months)": 90,
+    "Third Visit (3 ½ Months)": 120,
+    "Fourth Visit (9 Months)": 150,
+    "Fifth Visit (1 Year)": 180,
 }
 
 # =========================
@@ -35,49 +38,56 @@ TEST_DELAY_MAP = {
 VACCINE_FLOW = {
     "At Birth": {
         "next_schedule": "First Visit (1 ½ Months)",
+        "days_until_next": 45,
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)"
-        ]
+            "Pneumococcal Conjugate Vaccine (PCV)",
+        ],
     },
     "First Visit (1 ½ Months)": {
         "next_schedule": "Second Visit (2 ½ Months)",
+        "days_until_next": 30,
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)"
-        ]
+            "Pneumococcal Conjugate Vaccine (PCV)",
+        ],
     },
     "Second Visit (2 ½ Months)": {
         "next_schedule": "Third Visit (3 ½ Months)",
+        "days_until_next": 30,
         "next_vaccines": [
             "Pentavalent Vaccine (DPT-Hep B-HIB)",
             "Oral Polio Vaccine (OPV)",
             "Inactivated Polio Vaccine (IPV)",
-            "Pneumococcal Conjugate Vaccine (PCV)"
-        ]
+            "Pneumococcal Conjugate Vaccine (PCV)",
+        ],
     },
     "Third Visit (3 ½ Months)": {
         "next_schedule": "Fourth Visit (9 Months)",
+        "days_until_next": 165,
         "next_vaccines": [
-            "Measles, Mumps, Rubella Vaccine (MMR)"
-        ]
+            "Measles, Mumps, Rubella Vaccine (MMR)",
+        ],
     },
     "Fourth Visit (9 Months)": {
         "next_schedule": "Fifth Visit (1 Year)",
+        "days_until_next": 90,
         "next_vaccines": [
-            "Measles, Mumps, Rubella Vaccine (MMR)"
-        ]
+            "Measles, Mumps, Rubella Vaccine (MMR)",
+        ],
     },
     "Fifth Visit (1 Year)": {
         "next_schedule": None,
-        "next_vaccines": []
-    }
+        "days_until_next": None,
+        "next_vaccines": [],
+    },
 }
 
+
 # =========================
-# DATABASE FUNCTIONS
+# DATABASE
 # =========================
 def connect_db():
     return sqlite3.connect(DB_NAME)
@@ -88,21 +98,24 @@ def create_table():
     cursor = conn.cursor()
 
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS patients (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT UNIQUE,
-        name TEXT,
-        age INTEGER,
-        guardian_name TEXT,
-        contact_number TEXT,
-        vaccine_type TEXT,
-        vaccine_schedule TEXT,
-        date_of_visit TEXT,
-        email TEXT,
-        last_emailed_schedule TEXT,
-        initial_email_sent INTEGER DEFAULT 0,
-        schedule_changed_at TEXT
-    )
+        CREATE TABLE IF NOT EXISTS patients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT UNIQUE,
+            password TEXT,
+            consent TEXT,
+            admission_type TEXT,
+            name TEXT,
+            age INTEGER,
+            guardian_name TEXT,
+            contact_number TEXT,
+            email TEXT,
+            vaccine_type TEXT,
+            vaccine_schedule TEXT,
+            date_of_visit TEXT,
+            last_emailed_schedule TEXT,
+            initial_email_sent INTEGER DEFAULT 0,
+            schedule_changed_at TEXT
+        )
     """)
 
     conn.commit()
@@ -114,16 +127,20 @@ def ensure_columns_exist():
     cursor = conn.cursor()
 
     cursor.execute("PRAGMA table_info(patients)")
-    columns = [column[1] for column in cursor.fetchall()]
+    existing_columns = [col[1] for col in cursor.fetchall()]
 
-    if "last_emailed_schedule" not in columns:
-        cursor.execute("ALTER TABLE patients ADD COLUMN last_emailed_schedule TEXT")
+    required_columns = {
+        "password": "TEXT",
+        "consent": "TEXT",
+        "admission_type": "TEXT",
+        "last_emailed_schedule": "TEXT",
+        "initial_email_sent": "INTEGER DEFAULT 0",
+        "schedule_changed_at": "TEXT",
+    }
 
-    if "initial_email_sent" not in columns:
-        cursor.execute("ALTER TABLE patients ADD COLUMN initial_email_sent INTEGER DEFAULT 0")
-
-    if "schedule_changed_at" not in columns:
-        cursor.execute("ALTER TABLE patients ADD COLUMN schedule_changed_at TEXT")
+    for column_name, column_type in required_columns.items():
+        if column_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE patients ADD COLUMN {column_name} {column_type}")
 
     conn.commit()
     conn.close()
@@ -138,47 +155,69 @@ def get_patient_by_timestamp(cursor, timestamp):
     return cursor.fetchone()
 
 
-def insert_patient(cursor, patient_data):
+def insert_patient(cursor, data):
     cursor.execute("""
         INSERT INTO patients (
             timestamp,
+            password,
+            consent,
+            admission_type,
             name,
             age,
             guardian_name,
             contact_number,
+            email,
             vaccine_type,
             vaccine_schedule,
             date_of_visit,
-            email,
             last_emailed_schedule,
             initial_email_sent,
             schedule_changed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, patient_data)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, data)
 
 
-def update_patient_info(cursor, timestamp, age, guardian_name, contact_number,
-                        vaccine_type, vaccine_schedule, date_of_visit, email, name):
+def update_patient_info(
+    cursor,
+    timestamp,
+    password,
+    consent,
+    admission_type,
+    name,
+    age,
+    guardian_name,
+    contact_number,
+    email,
+    vaccine_type,
+    vaccine_schedule,
+    date_of_visit
+):
     cursor.execute("""
         UPDATE patients
-        SET name = ?,
+        SET password = ?,
+            consent = ?,
+            admission_type = ?,
+            name = ?,
             age = ?,
             guardian_name = ?,
             contact_number = ?,
+            email = ?,
             vaccine_type = ?,
             vaccine_schedule = ?,
-            date_of_visit = ?,
-            email = ?
+            date_of_visit = ?
         WHERE timestamp = ?
     """, (
+        password,
+        consent,
+        admission_type,
         name,
         age,
         guardian_name,
         contact_number,
+        email,
         vaccine_type,
         vaccine_schedule,
         date_of_visit,
-        email,
         timestamp
     ))
 
@@ -208,7 +247,7 @@ def mark_initial_email_sent(cursor, timestamp):
 
 
 # =========================
-# GOOGLE SHEET FUNCTIONS
+# GOOGLE SHEETS
 # =========================
 def fetch_csv(url):
     with urllib.request.urlopen(url) as response:
@@ -219,8 +258,21 @@ def fetch_csv(url):
     return list(reader)
 
 
+def clean_value(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def get_value(row, *possible_keys):
+    for key in possible_keys:
+        if key in row:
+            return clean_value(row.get(key))
+    return ""
+
+
 # =========================
-# TIME / TEST DATE FUNCTIONS
+# DATE / TIME HELPERS
 # =========================
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -230,7 +282,7 @@ def parse_datetime(datetime_str):
     if not datetime_str:
         return None
 
-    possible_formats = [
+    formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
         "%m/%d/%Y %H:%M:%S",
@@ -243,13 +295,61 @@ def parse_datetime(datetime_str):
         "%b %d, %Y",
     ]
 
-    for fmt in possible_formats:
+    for fmt in formats:
         try:
             return datetime.strptime(datetime_str.strip(), fmt)
         except ValueError:
-            continue
+            pass
 
     return None
+
+
+def parse_date_only(date_str):
+    if not date_str:
+        return None
+
+    formats = [
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%d/%m/%Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%m/%d/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            pass
+
+    return None
+
+
+def format_vaccination_date(dt):
+    if not dt:
+        return "Not available"
+    return dt.strftime("%B %d, %Y")
+
+
+def calculate_next_vaccination_date(current_schedule, visit_date):
+    if not current_schedule or not visit_date:
+        return None
+
+    visit_dt = parse_date_only(visit_date)
+    if not visit_dt:
+        return None
+
+    schedule_info = VACCINE_FLOW.get(current_schedule)
+    if not schedule_info:
+        return None
+
+    days_until_next = schedule_info.get("days_until_next")
+    if days_until_next is None:
+        return None
+
+    return visit_dt + timedelta(days=days_until_next)
 
 
 def calculate_test_due_datetime(current_schedule, schedule_changed_at):
@@ -265,12 +365,6 @@ def calculate_test_due_datetime(current_schedule, schedule_changed_at):
         return None
 
     return base_time + timedelta(seconds=delay_seconds)
-
-
-def format_due_datetime(dt):
-    if not dt:
-        return "Not available"
-    return dt.strftime("%B %d, %Y %I:%M:%S %p")
 
 
 # =========================
@@ -299,7 +393,7 @@ def normalize_schedule(schedule_text):
 
 
 # =========================
-# EMAIL BUILDERS
+# EMAIL CONTENT
 # =========================
 def build_initial_email(name, guardian_name, current_schedule, visit_date):
     return f"""
@@ -316,9 +410,7 @@ Name: {name}
 Current schedule: {current_schedule if current_schedule else "Not recognized"}
 Visit date: {visit_date if visit_date else "Not provided"}
 
-You will receive future vaccination reminders from this system based on the recorded schedule.
-
-Please make sure that your baby's information in the form remains updated.
+This email will start to notify you for next vaccination.
 
 Thank you and keep safe.
 
@@ -326,8 +418,8 @@ Care4Core Vaccination Reminder System
 """.strip()
 
 
-def build_reminder_email(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_due_datetime):
-    vaccines_text = "\n".join(f"- {v}" for v in next_vaccines)
+def build_reminder_email(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date):
+    vaccines_text = "\n".join(f"- {v}" for v in next_vaccines) if next_vaccines else "No vaccine listed."
 
     return f"""
 Dear {guardian_name if guardian_name else "Parent/Guardian"},
@@ -340,15 +432,15 @@ Current completed schedule:
 {current_schedule}
 
 Next vaccination schedule:
-{next_schedule}
+{next_schedule if next_schedule else "No next schedule available"}
 
-Expected next vaccination date/time (testing mode):
-{next_due_datetime}
+Next vaccination date:
+{next_vaccination_date}
 
 Recommended vaccine(s) for the next visit:
 {vaccines_text}
 
-Please visit your nearest health center on or before the expected schedule for your baby's next vaccination.
+Please visit your nearest health center on or before the expected vaccination date.
 
 If you have already completed this vaccination, please disregard this message.
 
@@ -371,9 +463,11 @@ def send_email(to_email, subject, body):
 
 
 # =========================
-# MAIN PROCESSING
+# MAIN PROCESS
 # =========================
 def process_patients():
+    conn = None
+
     try:
         rows = fetch_csv(CSV_URL)
 
@@ -381,84 +475,97 @@ def process_patients():
         cursor = conn.cursor()
 
         for row in rows:
-            timestamp = row.get("Timestamp")
-            name = row.get("Pangalan (Apelyido, Pangalan, M.I.)")
-            age = row.get("Edad")
-            guardian = row.get("Pangalan ng Magulang o Tagapangalaga")
-            contact = row.get("Contact Number (ex. 9649127322)")
-            vaccine = row.get("Klase ng Bakuna")
-            schedule_raw = row.get("Iskedyul ng mga Bakuna")
-            visit = row.get("Petsa ng Pagbisita")
-            email = row.get("Email address")
+            timestamp = get_value(row, "Timestamp")
+            password = get_value(row, "Password")
+            consent = get_value(
+                row,
+                'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin sa pamamagitn ng pag-click sa "Sang-ayon"',
+                'Bilang pagsangod sa Data Privacy Act of 2012 Nauunawaan ko na ang aking datos ay gagamitin Sa pamamagitan ng pag-click sa "Sang-ayon"'
+            )
+            admission_type = get_value(row, "Admission Type")
+            name = get_value(row, "Pangalan (Apelyido, Pangalan, M.I.)")
+            age_text = get_value(row, "Edad")
+            guardian = get_value(row, "Pangalan ng Magulang o Tagapangalaga")
+            contact = get_value(row, "Contact Number (ex. 9649127322)")
+            email = get_value(row, "Email Address", "Email address")
+            vaccine = get_value(row, "Klase ng Bakuna")
+            schedule_raw = get_value(row, "Iskedyul ng mga Bakuna")
+            visit = get_value(row, "Petsa ng Pagbisita")
 
             if not timestamp:
                 continue
 
             try:
-                age = int(age)
+                age = int(age_text)
             except (TypeError, ValueError):
                 age = None
 
-            current_schedule = normalize_schedule(schedule_raw)
-            existing_patient = get_patient_by_timestamp(cursor, timestamp)
+            normalized_schedule = normalize_schedule(schedule_raw)
+            patient = get_patient_by_timestamp(cursor, timestamp)
 
-            if existing_patient is None:
+            if patient is None:
                 detected_time = now_str()
 
                 insert_patient(cursor, (
                     timestamp,
+                    password,
+                    consent,
+                    admission_type,
                     name,
                     age,
                     guardian,
                     contact,
-                    vaccine,
-                    current_schedule,
-                    visit,
                     email,
+                    vaccine,
+                    normalized_schedule,
+                    visit,
                     None,
                     0,
                     detected_time
                 ))
 
-                print(f"New patient added: {name}")
+                stored_schedule = normalized_schedule
                 last_emailed_schedule = None
                 initial_email_sent = 0
-                stored_schedule = current_schedule
                 schedule_changed_at = detected_time
 
+                print(f"New patient added: {name}")
+
             else:
-                _, stored_schedule, last_emailed_schedule, initial_email_sent, schedule_changed_at = existing_patient
+                _, stored_schedule, last_emailed_schedule, initial_email_sent, schedule_changed_at = patient
+
+                schedule_to_store = normalized_schedule if normalized_schedule else stored_schedule
 
                 update_patient_info(
                     cursor,
                     timestamp,
+                    password,
+                    consent,
+                    admission_type,
+                    name,
                     age,
                     guardian,
                     contact,
-                    vaccine,
-                    current_schedule,
-                    visit,
                     email,
-                    name
+                    vaccine,
+                    schedule_to_store,
+                    visit
                 )
 
-                if current_schedule != stored_schedule:
-                    schedule_changed_at = now_str()
-                    update_schedule_and_time(cursor, timestamp, current_schedule, schedule_changed_at)
-                    print(f"Schedule changed for {name}: {stored_schedule} -> {current_schedule}")
+                if normalized_schedule and normalized_schedule != stored_schedule:
+                    new_changed_at = now_str()
+                    update_schedule_and_time(cursor, timestamp, normalized_schedule, new_changed_at)
+                    print(f"Schedule changed for {name}: {stored_schedule} -> {normalized_schedule}")
+                    stored_schedule = normalized_schedule
+                    schedule_changed_at = new_changed_at
 
-            # Send initial email only once
+                normalized_schedule = schedule_to_store
+
             if email and initial_email_sent == 0:
-                initial_subject = f"Care4Core Registration Confirmation for {name}"
-                initial_body = build_initial_email(
-                    name=name,
-                    guardian_name=guardian,
-                    current_schedule=current_schedule,
-                    visit_date=visit
-                )
-
                 try:
-                    send_email(email, initial_subject, initial_body)
+                    subject = f"Care4Core Registration Confirmation for {name}"
+                    body = build_initial_email(name, guardian, normalized_schedule, visit)
+                    send_email(email, subject, body)
                     mark_initial_email_sent(cursor, timestamp)
                     initial_email_sent = 1
                     print(f"Initial email sent to {name} ({email})")
@@ -469,63 +576,82 @@ def process_patients():
                 print(f"Skipped reminder for {name}: no email address.")
                 continue
 
-            if not current_schedule:
+            if not normalized_schedule:
                 print(f"Skipped reminder for {name}: schedule not recognized.")
                 continue
 
-            if current_schedule == last_emailed_schedule:
-                print(f"No reminder for {name}: already emailed for schedule '{current_schedule}'.")
+            if normalized_schedule == last_emailed_schedule:
+                print(f"No reminder for {name}: already emailed for schedule '{normalized_schedule}'.")
                 continue
 
-            next_info = VACCINE_FLOW.get(current_schedule)
-            if not next_info or not next_info["next_schedule"]:
-                print(f"No reminder for {name}: no next vaccine schedule available.")
-                update_last_emailed_schedule(cursor, timestamp, current_schedule)
+            next_info = VACCINE_FLOW.get(normalized_schedule)
+            if not next_info:
+                print(f"Skipped reminder for {name}: no vaccine flow found.")
                 continue
 
-            due_datetime = calculate_test_due_datetime(current_schedule, schedule_changed_at)
-            if not due_datetime:
-                print(f"Skipped reminder for {name}: could not calculate due time.")
+            next_schedule = next_info.get("next_schedule")
+            next_vaccines = next_info.get("next_vaccines", [])
+
+            if not next_schedule:
+                print(f"No reminder for {name}: no next schedule available.")
+                update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
                 continue
 
-            if datetime.now() < due_datetime:
-                remaining = int((due_datetime - datetime.now()).total_seconds())
-                print(f"Waiting for reminder of {name}: {remaining} second(s) remaining.")
+            next_vaccination_dt = calculate_next_vaccination_date(normalized_schedule, visit)
+            if not next_vaccination_dt:
+                print(f"Skipped reminder for {name}: could not calculate next vaccination date.")
                 continue
 
-            reminder_subject = f"Vaccination Reminder for {name}"
-            reminder_body = build_reminder_email(
-                name=name,
-                guardian_name=guardian,
-                current_schedule=current_schedule,
-                next_schedule=next_info["next_schedule"],
-                next_vaccines=next_info["next_vaccines"],
-                next_due_datetime=format_due_datetime(due_datetime)
-            )
+            if TEST_MODE:
+                due_time = calculate_test_due_datetime(normalized_schedule, schedule_changed_at)
+                if not due_time:
+                    print(f"Skipped reminder for {name}: could not calculate test due time.")
+                    continue
+
+                if datetime.now() < due_time:
+                    remaining = int((due_time - datetime.now()).total_seconds())
+                    print(f"Waiting for reminder of {name}: {remaining} second(s) remaining.")
+                    continue
+            else:
+                if datetime.now().date() < next_vaccination_dt.date():
+                    print(f"Not yet time to remind {name}. Next vaccination date is {format_vaccination_date(next_vaccination_dt)}.")
+                    continue
 
             try:
-                send_email(email, reminder_subject, reminder_body)
-                update_last_emailed_schedule(cursor, timestamp, current_schedule)
-                print(f"Reminder email sent to {name} ({email}) for schedule '{current_schedule}'")
+                subject = f"Vaccination Reminder for {name}"
+                body = build_reminder_email(
+                    name=name,
+                    guardian_name=guardian,
+                    current_schedule=normalized_schedule,
+                    next_schedule=next_schedule,
+                    next_vaccines=next_vaccines,
+                    next_vaccination_date=format_vaccination_date(next_vaccination_dt)
+                )
+                send_email(email, subject, body)
+                update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
+                print(f"Reminder email sent to {name} ({email})")
             except Exception as e:
                 print(f"Failed to send reminder email to {name} ({email}): {e}")
 
         conn.commit()
-        conn.close()
 
     except Exception as e:
         print("Error while processing patients:", e)
 
+    finally:
+        if conn:
+            conn.close()
+
 
 # =========================
-# MAIN LOOP
+# MAIN
 # =========================
 def main():
     create_table()
     ensure_columns_exist()
 
-    print("Monitoring Google Sheet in TEST MODE...")
-    print("At Birth = 30 sec, First Visit = 60 sec, Second Visit = 90 sec, Third Visit = 120 sec, Fourth Visit = 150 sec")
+    print("Monitoring Google Sheet for new patients and reminders...")
+    print(f"TEST_MODE = {TEST_MODE}")
     print("-" * 60)
 
     while True:
