@@ -18,7 +18,7 @@ CHECK_INTERVAL = 5  # seconds
 SENDER_EMAIL = "rentestpy@gmail.com"
 SENDER_PASSWORD = "wifk rurp qlix itzd"
 
-BOT_TOKEN = "your_telegram_bot_token"
+BOT_TOKEN = "8544421333:AAHFb3y9NhdgNSDVi8-l-u9KQpIfS9Rr66M"
 
 # True = quick testing using seconds
 # False = real reminder based on actual next vaccination date
