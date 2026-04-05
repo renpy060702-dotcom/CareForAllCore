@@ -18,7 +18,7 @@ CHECK_INTERVAL = 5  # seconds
 SENDER_EMAIL = "rentestpy@gmail.com"
 SENDER_PASSWORD = "wifk rurp qlix itzd"
 
-BOT_TOKEN = "8544421333:AAHFb3y9NhdgNSDVi8-l-u9KQpIfS9Rr66M"
+BOT_TOKEN = "your_telegram_bot_token"
 
 # True = quick testing using seconds
 # False = real reminder based on actual next vaccination date
@@ -468,7 +468,7 @@ def get_next_vaccine_info(current_schedule, visit_date):
 # =========================
 # EMAIL
 # =========================
-def build_initial_email(name, guardian_name, current_schedule, visit_date):
+def build_initial_email(name, guardian_name, current_schedule, visit_date, telegram_id):
     return f"""
 Dear {guardian_name if guardian_name else "Parent/Guardian"},
 
@@ -482,6 +482,7 @@ Recorded information:
 Name: {name}
 Current schedule: {current_schedule if current_schedule else "Not recognized"}
 Visit date: {visit_date if visit_date else "Not provided"}
+Telegram ID: {telegram_id if telegram_id else "Not provided"}
 
 This email will start to notify you for next vaccination.
 
@@ -491,7 +492,7 @@ Care4Core Vaccination Reminder System
 """.strip()
 
 
-def build_reminder_email(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date):
+def build_reminder_email(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date, telegram_id):
     vaccines_text = "\n".join(f"- {v}" for v in next_vaccines) if next_vaccines else "No vaccine listed."
 
     return f"""
@@ -500,6 +501,12 @@ Dear {guardian_name if guardian_name else "Parent/Guardian"},
 Good day!
 
 This is a friendly reminder regarding the next vaccination schedule for {name}.
+
+Patient name:
+{name}
+
+Telegram ID:
+{telegram_id if telegram_id else "Not provided"}
 
 Current completed schedule:
 {current_schedule}
@@ -538,7 +545,7 @@ def send_email(to_email, subject, body):
 # =========================
 # TELEGRAM
 # =========================
-def build_initial_telegram(name, guardian_name, current_schedule, visit_date):
+def build_initial_telegram(name, guardian_name, current_schedule, visit_date, telegram_id):
     return f"""Care4Core Registration Confirmation
 
 Hello {guardian_name if guardian_name else "Parent/Guardian"},
@@ -551,11 +558,14 @@ Current schedule:
 Visit date:
 {visit_date if visit_date else "Not provided"}
 
+Telegram ID:
+{telegram_id if telegram_id else "Not provided"}
+
 Telegram reminders are now enabled.
 """
 
 
-def build_telegram_reminder(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date):
+def build_telegram_reminder(name, guardian_name, current_schedule, next_schedule, next_vaccines, next_vaccination_date, telegram_id):
     vaccines_text = "\n".join(f"- {v}" for v in next_vaccines) if next_vaccines else "No vaccine listed."
 
     return f"""Care4Core Vaccination Reminder
@@ -563,6 +573,9 @@ def build_telegram_reminder(name, guardian_name, current_schedule, next_schedule
 Hello {guardian_name if guardian_name else "Parent/Guardian"},
 
 This is a reminder for {name}'s next vaccination.
+
+Telegram ID:
+{telegram_id if telegram_id else "Not provided"}
 
 Current completed schedule:
 {current_schedule}
@@ -650,10 +663,10 @@ def process_patients():
                     vaccine,
                     normalized_schedule,
                     visit,
-                    None,   # last_emailed_schedule
-                    None,   # last_telegram_schedule
-                    0,      # initial_email_sent
-                    0,      # initial_telegram_sent
+                    None,
+                    None,
+                    0,
+                    0,
                     detected_time
                 ))
 
@@ -711,7 +724,13 @@ def process_patients():
             if email and initial_email_sent == 0:
                 try:
                     subject = f"Care4Core Registration Confirmation for {name}"
-                    body = build_initial_email(name, guardian, normalized_schedule, visit)
+                    body = build_initial_email(
+                        name=name,
+                        guardian_name=guardian,
+                        current_schedule=normalized_schedule,
+                        visit_date=visit,
+                        telegram_id=telegram_chat_id
+                    )
                     send_email(email, subject, body)
                     mark_initial_email_sent(cursor, timestamp)
                     initial_email_sent = 1
@@ -724,7 +743,13 @@ def process_patients():
             # =========================
             if telegram_chat_id and initial_telegram_sent == 0:
                 try:
-                    tg_initial = build_initial_telegram(name, guardian, normalized_schedule, visit)
+                    tg_initial = build_initial_telegram(
+                        name=name,
+                        guardian_name=guardian,
+                        current_schedule=normalized_schedule,
+                        visit_date=visit,
+                        telegram_id=telegram_chat_id
+                    )
                     send_telegram_message(telegram_chat_id, tg_initial)
                     mark_initial_telegram_sent(cursor, timestamp)
                     initial_telegram_sent = 1
@@ -732,7 +757,6 @@ def process_patients():
                 except Exception as e:
                     print(f"Failed to send initial Telegram message to {name} ({telegram_chat_id}): {e}")
 
-            # no recognized schedule yet
             if not normalized_schedule:
                 print(f"Skipped reminder for {name}: schedule not recognized.")
                 continue
@@ -800,7 +824,8 @@ def process_patients():
                         current_schedule=normalized_schedule,
                         next_schedule=next_schedule,
                         next_vaccines=next_vaccines,
-                        next_vaccination_date=format_vaccination_date(next_vaccination_dt)
+                        next_vaccination_date=format_vaccination_date(next_vaccination_dt),
+                        telegram_id=telegram_chat_id
                     )
                     send_email(email, subject, body)
                     update_last_emailed_schedule(cursor, timestamp, normalized_schedule)
@@ -819,7 +844,8 @@ def process_patients():
                         current_schedule=normalized_schedule,
                         next_schedule=next_schedule,
                         next_vaccines=next_vaccines,
-                        next_vaccination_date=format_vaccination_date(next_vaccination_dt)
+                        next_vaccination_date=format_vaccination_date(next_vaccination_dt),
+                        telegram_id=telegram_chat_id
                     )
                     telegram_result = send_telegram_message(telegram_chat_id, telegram_body)
                     update_last_telegram_schedule(cursor, timestamp, normalized_schedule)
